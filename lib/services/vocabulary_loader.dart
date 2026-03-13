@@ -1,24 +1,8 @@
 // lib/services/vocabulary_loader.dart
 //
 // DATENQUELLE: TU Chemnitz Deutsch-Englisch Wörterbuch
-// ─────────────────────────────────────────────────────
-// Urheber: Frank Richter, TU Chemnitz (seit 1995)
-// Lizenz:  GNU GPL 2.0+ — kostenlos und rechtlich einwandfrei
-// URL:     https://ftp.tu-chemnitz.de/pub/Local/urz/ding/de-en/
-// Roheinträge: ~400.000 — die App filtert auf die besten ~15.000
-//
-// Ablauf beim ersten Start:
-//   1. Wörterbuchdatei (~8 MB) wird heruntergeladen
-//   2. Einträge werden gefiltert und bereinigt
-//   3. Maximal 15.000 Einträge werden lokal in SQLite gespeichert
-//   4. Danach funktioniert die App vollständig offline
-//
-// Filter-Kriterien (was behalten wird):
-//   - Einfache Wörter oder kurze Phrasen (max. 4 Wörter)
-//   - Keine reinen Abkürzungen
-//   - Keine Einträge mit Sonderzeichen wie / < > =
-//   - Keine zu kurzen Einträge (unter 3 Zeichen)
-//   - Häufige Wörter zuerst (Reihenfolge in der Quelldatei)
+// Lizenz: GNU GPL 2.0+
+// URL: https://ftp.tu-chemnitz.de/pub/Local/urz/ding/de-en/
 
 import 'dart:convert';
 import 'package:http/http.dart' as http;
@@ -26,14 +10,14 @@ import '../models/vocabulary.dart';
 import 'database_service.dart';
 
 class VocabularyLoader {
-  // URL zur Wörterbuchdatei der TU Chemnitz (GNU GPL 2.0+)
   static const String _dictUrl =
       'https://ftp.tu-chemnitz.de/pub/Local/urz/ding/de-en/de-en.txt';
 
-  // Maximale Anzahl zu speichernder Einträge
   static const int _maxEntries = 15000;
 
-  /// Hauptfunktion: Vokabeln laden und in lokaler Datenbank speichern
+  // Maximale Dateigröße: 20 MB (Schutz vor zu großen Antworten)
+  static const int _maxResponseBytes = 20 * 1024 * 1024;
+
   static Future<int> loadAndSaveVocabularies({
     void Function(String status)? onStatus,
   }) async {
@@ -49,7 +33,6 @@ class VocabularyLoader {
         'Bitte Internetverbindung prüfen und\n'
         '"Aktualisieren" erneut antippen.',
       );
-      // Eingebettete Notfall-Liste als Fallback
       vocabs = _getBuiltinFallback();
     }
 
@@ -65,52 +48,61 @@ class VocabularyLoader {
     return vocabs.length;
   }
 
-  /// Wörterbuch von TU Chemnitz herunterladen und auf beste Einträge filtern
   static Future<List<Vocabulary>> _loadFromTuChemnitz({
     void Function(String status)? onStatus,
   }) async {
     onStatus?.call('Lade Wörterbuch herunter (~8 MB)...\nBitte 1-2 Minuten warten.');
 
-    final response = await http.get(
-      Uri.parse(_dictUrl),
-    ).timeout(const Duration(seconds: 120));
-
-    if (response.statusCode != 200) {
-      throw Exception('HTTP ${response.statusCode}');
-    }
-
-    // TU Chemnitz Datei ist in Latin-1 kodiert
-    String rawText;
+    // Sicherheit: Timeout und Größenbeschränkung
+    final client = http.Client();
     try {
-      rawText = latin1.decode(response.bodyBytes);
-    } catch (_) {
-      rawText = utf8.decode(response.bodyBytes, allowMalformed: true);
-    }
+      final request = http.Request('GET', Uri.parse(_dictUrl));
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 120));
 
-    onStatus?.call('Verarbeite und filtere Einträge...');
-    return _parseDingFormat(rawText, onStatus: onStatus);
+      if (response.statusCode != 200) {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+
+      // Größenbeschränkung: max 20 MB einlesen
+      final bytes = <int>[];
+      await for (final chunk in response.stream) {
+        bytes.addAll(chunk);
+        if (bytes.length > _maxResponseBytes) {
+          break; // Genug geladen, Rest ignorieren
+        }
+      }
+
+      // TU Chemnitz Datei ist in Latin-1 kodiert
+      String rawText;
+      try {
+        rawText = latin1.decode(bytes);
+      } catch (_) {
+        rawText = utf8.decode(bytes, allowMalformed: true);
+      }
+
+      onStatus?.call('Verarbeite und filtere Einträge...');
+      return _parseDingFormat(rawText, onStatus: onStatus);
+    } finally {
+      client.close();
+    }
   }
 
-  /// Parst das Ding-Format und filtert auf die besten Einträge
   static List<Vocabulary> _parseDingFormat(
     String text, {
     void Function(String status)? onStatus,
   }) {
     final vocabs = <Vocabulary>[];
     final lines = text.split('\n');
-    int processed = 0;
     int skipped = 0;
 
     for (final rawLine in lines) {
-      // Sobald wir genug haben, aufhören
       if (vocabs.length >= _maxEntries) break;
 
       final line = rawLine.trim();
-
-      // Kommentare und leere Zeilen überspringen
       if (line.isEmpty || line.startsWith('#')) continue;
 
-      // Trennzeichen " :: " finden
       final sepIdx = line.indexOf(' :: ');
       if (sepIdx < 0) continue;
 
@@ -119,7 +111,6 @@ class VocabularyLoader {
 
       if (dePart.isEmpty || enPart.isEmpty) continue;
 
-      // Eintrag bereinigen
       final wordDe = _extractBestTerm(dePart);
       final wordEn = _extractBestTerm(enPart);
 
@@ -128,86 +119,61 @@ class VocabularyLoader {
         continue;
       }
 
-      // Qualitätsfilter
       if (!_passesQualityFilter(wordEn, wordDe)) {
         skipped++;
         continue;
       }
 
-      vocabs.add(Vocabulary(
-        wordEn: wordEn,
-        wordDe: wordDe,
-        level: 'DE-EN',
-      ));
+      vocabs.add(Vocabulary(wordEn: wordEn, wordDe: wordDe, level: 'DE-EN'));
 
-      processed++;
-      if (processed % 2000 == 0) {
-        onStatus?.call(
-          '${vocabs.length} von $_maxEntries Einträgen gesammelt...',
-        );
+      if (vocabs.length % 2000 == 0) {
+        onStatus?.call('${vocabs.length} von $_maxEntries Einträgen gesammelt...');
       }
     }
 
-    onStatus?.call('${vocabs.length} Einträge ausgewählt (${skipped} übersprungen).');
+    onStatus?.call('${vocabs.length} Einträge ausgewählt.');
     return vocabs;
   }
 
-  /// Qualitätsfilter: Gibt true zurück wenn der Eintrag sinnvoll ist
   static bool _passesQualityFilter(String en, String de) {
-    // Zu kurze Einträge ablehnen
     final enFirst = en.split('|').first;
     final deFirst = de.split('|').first;
     if (enFirst.length < 3 || deFirst.length < 3) return false;
 
-    // Einträge mit Sonderzeichen ablehnen (technische/math. Symbole)
     final badChars = RegExp(r'[<>=\+\*\^\$\\]');
     if (badChars.hasMatch(enFirst) || badChars.hasMatch(deFirst)) return false;
 
-    // Reine Abkürzungen überspringen (z.B. "USA", "NATO")
-    // Erlaubt: "DNA", "GPS" wenn auch eine Beschreibung da ist
-    if (enFirst == enFirst.toUpperCase() && enFirst.length <= 4 &&
+    if (enFirst == enFirst.toUpperCase() &&
+        enFirst.length <= 4 &&
         !enFirst.contains(' ')) {
       return false;
     }
 
-    // Einträge die nur Zahlen sind ablehnen
     if (RegExp(r'^\d+$').hasMatch(enFirst)) return false;
-
-    // Zu lange Phrasen ablehnen (mehr als 5 Wörter)
     if (enFirst.split(' ').length > 5) return false;
 
     return true;
   }
 
-  /// Bereinigt einen Ding-Format-Eintrag und gibt die besten Varianten zurück
   static String _extractBestTerm(String raw) {
-    // Inhalt in eckigen Klammern entfernen: [Am.], [Br.], [Plural]
     var cleaned = raw.replaceAll(RegExp(r'\[.*?\]'), '');
-
-    // Inhalt in geschweiften Klammern entfernen: {sth.}, {etw.}
-    cleaned = cleaned.replaceAll(RegExp(r'\{.*?\]'), '');
     cleaned = cleaned.replaceAll(RegExp(r'\{[^}]*\}'), '');
-
-    // Inhalt in runden Klammern entfernen: (ugs.), (fam.)
     cleaned = cleaned.replaceAll(RegExp(r'\([^)]*\)'), '');
 
-    // Mehrfacheinträge durch Semikolon aufteilen
     final parts = cleaned
         .split(';')
         .map((s) => s.trim())
         .where((s) => s.isNotEmpty && s.length >= 2)
-        .where((s) => s.split(' ').length <= 4) // max 4 Wörter pro Begriff
+        .where((s) => s.split(' ').length <= 4)
         .where((s) => !s.contains('/'))
         .where((s) => !s.contains('\\'))
-        .take(3) // max 3 Synonyme
+        .take(3)
         .toList();
 
     if (parts.isEmpty) return '';
     return parts.join('|');
   }
 
-  // ── Eingebettete Notfall-Liste (50 Wörter) ────────────────────────────────
-  // Wird nur angezeigt wenn kein Internet verfügbar ist
   static List<Vocabulary> _getBuiltinFallback() {
     return [
       Vocabulary(wordEn: 'to achieve', wordDe: 'erreichen|erzielen', level: 'C1'),

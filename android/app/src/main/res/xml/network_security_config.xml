@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Netzwerk-Sicherheitskonfiguration
+    
+    Diese Datei legt fest, mit welchen Servern die App kommunizieren darf.
+    Nur HTTPS ist erlaubt — kein unverschlüsseltes HTTP.
+    Einzige Ausnahme: TU Chemnitz FTP-Server für den einmaligen Vokabel-Download.
+-->
+<network-security-config>
+    <!-- Standard: nur HTTPS erlaubt, kein HTTP -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <!-- Nur vertrauenswürdige System-Zertifikate (kein Nutzer-CA) -->
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+
+    <!-- Ausnahme: TU Chemnitz FTP-Server (HTTP erlaubt, da FTP-Spiegel) -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">ftp.tu-chemnitz.de</domain>
+    </domain-config>
+</network-security-config>
