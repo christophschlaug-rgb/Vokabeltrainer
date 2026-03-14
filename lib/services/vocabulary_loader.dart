@@ -1,8 +1,5 @@
 // lib/services/vocabulary_loader.dart
-//
-// DATENQUELLE: TU Chemnitz Deutsch-Englisch Wörterbuch
-// Lizenz: GNU GPL 2.0+
-// URL: https://ftp.tu-chemnitz.de/pub/Local/urz/ding/de-en/
+// Lädt das TU Chemnitz Wörterbuch (GNU GPL 2.0+)
 
 import 'dart:convert';
 import 'package:http/http.dart' as http;
@@ -14,46 +11,61 @@ class VocabularyLoader {
       'https://ftp.tu-chemnitz.de/pub/Local/urz/ding/de-en/de-en.txt';
 
   static const int _maxEntries = 15000;
+  static const int _maxResponseBytes = 20 * 1024 * 1024; // 20 MB Sicherheitslimit
 
-  // Maximale Dateigröße: 20 MB (Schutz vor zu großen Antworten)
-  static const int _maxResponseBytes = 20 * 1024 * 1024;
-
+  /// Vokabeln laden, deduplizieren und in der Datenbank speichern.
+  /// Bestehender Lernfortschritt bleibt erhalten.
   static Future<int> loadAndSaveVocabularies({
     void Function(String status)? onStatus,
   }) async {
     onStatus?.call('Verbinde mit TU Chemnitz Wörterbuch...');
 
     List<Vocabulary> vocabs = [];
+    bool onlineFailed = false;
 
     try {
       vocabs = await _loadFromTuChemnitz(onStatus: onStatus);
     } catch (e) {
+      onlineFailed = true;
       onStatus?.call(
         'Online-Laden fehlgeschlagen.\n'
         'Bitte Internetverbindung prüfen und\n'
-        '"Aktualisieren" erneut antippen.',
+        '"Neu laden" erneut antippen.',
       );
+    }
+
+    // Fallback nur wenn Online-Download wirklich fehlgeschlagen ist
+    // UND noch keine Vokabeln in der DB vorhanden sind
+    if (onlineFailed) {
+      final existing = await DatabaseService.getVocabularyCount();
+      if (existing > 0) {
+        onStatus?.call('⚠️ Kein Internet. Vorhandene $existing Vokabeln werden behalten.');
+        return existing;
+      }
+      onStatus?.call('Lade 50 Offline-Vokabeln als Notfallset...');
       vocabs = _getBuiltinFallback();
     }
 
     if (vocabs.isEmpty) {
-      vocabs = _getBuiltinFallback();
+      onStatus?.call('⚠️ Keine Vokabeln gefunden.');
+      return 0;
     }
 
-    onStatus?.call('Speichere ${vocabs.length} Vokabeln lokal...');
-    await DatabaseService.insertVocabularies(vocabs);
+    onStatus?.call('Speichere ${vocabs.length} Vokabeln (ohne Duplikate)...');
+
+    // replaceAllVocabularies: löscht alte, fügt neue ein, stellt Fortschritt wieder her
+    await DatabaseService.replaceAllVocabularies(vocabs);
 
     final total = await DatabaseService.getVocabularyCount();
     onStatus?.call('✅ Fertig! $total Vokabeln verfügbar.');
-    return vocabs.length;
+    return total;
   }
 
   static Future<List<Vocabulary>> _loadFromTuChemnitz({
     void Function(String status)? onStatus,
   }) async {
-    onStatus?.call('Lade Wörterbuch herunter (~8 MB)...\nBitte 1-2 Minuten warten.');
+    onStatus?.call('Lade Wörterbuch herunter (~8 MB)...\nBitte 1–2 Minuten warten.');
 
-    // Sicherheit: Timeout und Größenbeschränkung
     final client = http.Client();
     try {
       final request = http.Request('GET', Uri.parse(_dictUrl));
@@ -65,16 +77,14 @@ class VocabularyLoader {
         throw Exception('HTTP ${response.statusCode}');
       }
 
-      // Größenbeschränkung: max 20 MB einlesen
+      // Sicherheit: max. 20 MB einlesen
       final bytes = <int>[];
       await for (final chunk in response.stream) {
         bytes.addAll(chunk);
-        if (bytes.length > _maxResponseBytes) {
-          break; // Genug geladen, Rest ignorieren
-        }
+        if (bytes.length > _maxResponseBytes) break;
       }
 
-      // TU Chemnitz Datei ist in Latin-1 kodiert
+      // Datei ist Latin-1 kodiert
       String rawText;
       try {
         rawText = latin1.decode(bytes);
@@ -94,8 +104,10 @@ class VocabularyLoader {
     void Function(String status)? onStatus,
   }) {
     final vocabs = <Vocabulary>[];
+    // Duplikat-Prüfung per Set (normalisierter word_en)
+    final seenEn = <String>{};
+
     final lines = text.split('\n');
-    int skipped = 0;
 
     for (final rawLine in lines) {
       if (vocabs.length >= _maxEntries) break;
@@ -108,21 +120,18 @@ class VocabularyLoader {
 
       final dePart = line.substring(0, sepIdx).trim();
       final enPart = line.substring(sepIdx + 4).trim();
-
       if (dePart.isEmpty || enPart.isEmpty) continue;
 
       final wordDe = _extractBestTerm(dePart);
       final wordEn = _extractBestTerm(enPart);
+      if (wordDe.isEmpty || wordEn.isEmpty) continue;
 
-      if (wordDe.isEmpty || wordEn.isEmpty) {
-        skipped++;
-        continue;
-      }
+      if (!_passesQualityFilter(wordEn, wordDe)) continue;
 
-      if (!_passesQualityFilter(wordEn, wordDe)) {
-        skipped++;
-        continue;
-      }
+      // Duplikat-Check: erstes Wort des EN-Eintrags als Schlüssel
+      final key = wordEn.split('|').first.trim().toLowerCase();
+      if (seenEn.contains(key)) continue;
+      seenEn.add(key);
 
       vocabs.add(Vocabulary(wordEn: wordEn, wordDe: wordDe, level: 'DE-EN'));
 
@@ -131,7 +140,7 @@ class VocabularyLoader {
       }
     }
 
-    onStatus?.call('${vocabs.length} Einträge ausgewählt.');
+    onStatus?.call('${vocabs.length} Einträge ausgewählt (dedupliziert).');
     return vocabs;
   }
 
@@ -143,6 +152,7 @@ class VocabularyLoader {
     final badChars = RegExp(r'[<>=\+\*\^\$\\]');
     if (badChars.hasMatch(enFirst) || badChars.hasMatch(deFirst)) return false;
 
+    // Reine Großbuchstaben-Abkürzungen (NATO, USA etc.) überspringen
     if (enFirst == enFirst.toUpperCase() &&
         enFirst.length <= 4 &&
         !enFirst.contains(' ')) {
@@ -156,9 +166,10 @@ class VocabularyLoader {
   }
 
   static String _extractBestTerm(String raw) {
-    var cleaned = raw.replaceAll(RegExp(r'\[.*?\]'), '');
-    cleaned = cleaned.replaceAll(RegExp(r'\{[^}]*\}'), '');
-    cleaned = cleaned.replaceAll(RegExp(r'\([^)]*\)'), '');
+    var cleaned = raw
+        .replaceAll(RegExp(r'\[.*?\]'), '')   // [Am.], [Br.] etc.
+        .replaceAll(RegExp(r'\{[^}]*\}'), '') // {sth.}, {etw.}
+        .replaceAll(RegExp(r'\([^)]*\)'), ''); // (ugs.), (fam.)
 
     final parts = cleaned
         .split(';')
@@ -174,6 +185,7 @@ class VocabularyLoader {
     return parts.join('|');
   }
 
+  // 50 Offline-Vokabeln — nur als absoluter Notfall ohne Internet
   static List<Vocabulary> _getBuiltinFallback() {
     return [
       Vocabulary(wordEn: 'to achieve', wordDe: 'erreichen|erzielen', level: 'C1'),
