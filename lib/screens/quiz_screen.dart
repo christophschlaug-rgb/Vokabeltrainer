@@ -1,6 +1,4 @@
 // lib/screens/quiz_screen.dart
-// Abfragebildschirm – hier werden Vokabeln abgefragt
-
 import 'dart:math';
 import 'package:flutter/material.dart';
 import '../models/vocabulary.dart';
@@ -15,13 +13,17 @@ class QuizScreen extends StatefulWidget {
 }
 
 class _QuizScreenState extends State<QuizScreen> {
-  List<Vocabulary> _queue = [];         // Heutige Vokabeln
-  int _currentIndex = 0;               // Aktuelle Position
-  bool _askGermanToEnglish = true;     // Abfragerichtung
-  bool _answered = false;              // Wurde bereits geantwortet?
-  bool _wasCorrect = false;            // War die Antwort richtig?
-  bool _isNearlyCorrect = false;       // War die Antwort fast richtig?
-  String _userInput = '';              // Eingabe des Benutzers
+  // ── Warteschlangen ───────────────────────────────────────────
+  List<Vocabulary> _mainQueue = [];     // Heutige Vokabeln (einmalig)
+  List<Vocabulary> _retryQueue = [];    // Falsch beantwortete → nochmal abfragen
+  bool _inRetryMode = false;            // Sind wir gerade im Wiederholungstopf?
+
+  int _currentIndex = 0;
+  bool _askGermanToEnglish = true;
+  bool _answered = false;
+  bool _wasCorrect = false;
+  bool _isNearlyCorrect = false;
+  String _userInput = '';
   int _correctCount = 0;
   int _wrongCount = 0;
   bool _isLoading = true;
@@ -29,6 +31,9 @@ class _QuizScreenState extends State<QuizScreen> {
   final _inputController = TextEditingController();
   final _focusNode = FocusNode();
   final _random = Random();
+
+  // IDs der bereits abgefragten Vokabeln (verhindert Duplikate)
+  final Set<int> _seenIds = {};
 
   @override
   void initState() {
@@ -44,42 +49,42 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   Future<void> _loadQueue() async {
-    final vocabs = await DatabaseService.getDueVocabularies(limit: 100);
+    final limit = await DatabaseService.getDailyLimit();
+    final vocabs = await DatabaseService.getDueVocabularies(limit: limit);
     setState(() {
-      _queue = vocabs;
+      _mainQueue = vocabs;
+      _inRetryMode = false;
       _isLoading = false;
       if (vocabs.isNotEmpty) _randomizeDirection();
     });
   }
 
   void _randomizeDirection() {
-    // Zufällig DE→EN oder EN→DE
     _askGermanToEnglish = _random.nextBool();
   }
 
-  Vocabulary get _current => _queue[_currentIndex];
+  // Aktuelle Vokabel — je nach Modus aus Haupt- oder Wiederholungsliste
+  Vocabulary get _current {
+    if (_inRetryMode) return _retryQueue[_currentIndex];
+    return _mainQueue[_currentIndex];
+  }
+
+  List<Vocabulary> get _activeQueue => _inRetryMode ? _retryQueue : _mainQueue;
 
   String get _question {
     return _askGermanToEnglish
-        ? _current.wordDe.split('|').first // Erste deutsche Übersetzung anzeigen
-        : _current.wordEn.split('|').first; // Erstes englisches Wort anzeigen
+        ? _current.wordDe.split('|').first
+        : _current.wordEn.split('|').first;
   }
 
   List<String> get _correctAnswers {
-    return _askGermanToEnglish
-        ? _current.englishVariants
-        : _current.germanTranslations;
+    return _askGermanToEnglish ? _current.englishVariants : _current.germanTranslations;
   }
 
-  String get _directionLabel {
-    return _askGermanToEnglish ? '🇩🇪 → 🇬🇧' : '🇬🇧 → 🇩🇪';
-  }
-
-  String get _inputHint {
-    return _askGermanToEnglish
-        ? 'Englische Übersetzung eingeben...'
-        : 'Deutsche Übersetzung eingeben...';
-  }
+  String get _directionLabel => _askGermanToEnglish ? '🇩🇪 → 🇬🇧' : '🇬🇧 → 🇩🇪';
+  String get _inputHint => _askGermanToEnglish
+      ? 'Englische Übersetzung eingeben...'
+      : 'Deutsche Übersetzung eingeben...';
 
   void _checkAnswer() {
     if (_userInput.trim().isEmpty) return;
@@ -100,16 +105,24 @@ class _QuizScreenState extends State<QuizScreen> {
       _isNearlyCorrect = nearly;
     });
 
-    // SRS aktualisieren
     _updateSrs(correct);
-
-    // Statistiken speichern
     DatabaseService.recordDailyReview(wasCorrect: correct);
 
     if (correct) {
       _correctCount++;
+      // Aus Wiederholungstopf entfernen sobald richtig beantwortet
+      if (_inRetryMode) {
+        _retryQueue.removeAt(_currentIndex);
+      }
     } else {
       _wrongCount++;
+      // Falsch → in Wiederholungstopf (aber kein Duplikat)
+      if (!_inRetryMode) {
+        final alreadyInRetry = _retryQueue.any((v) => v.id == _current.id);
+        if (!alreadyInRetry) {
+          _retryQueue.add(_current);
+        }
+      }
     }
   }
 
@@ -122,7 +135,30 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   void _nextCard() {
-    if (_currentIndex < _queue.length - 1) {
+    if (!_answered) return;
+
+    // Im Retry-Modus: Karte wurde richtig beantwortet und bereits entfernt
+    if (_inRetryMode) {
+      if (_retryQueue.isEmpty) {
+        _showResults();
+        return;
+      }
+      // Index anpassen (Liste wurde verkürzt)
+      setState(() {
+        _currentIndex = _currentIndex % _retryQueue.length;
+        _answered = false;
+        _wasCorrect = false;
+        _isNearlyCorrect = false;
+        _userInput = '';
+        _inputController.clear();
+        _randomizeDirection();
+      });
+      _focusNode.requestFocus();
+      return;
+    }
+
+    // Hauptliste: nächste Karte
+    if (_currentIndex < _mainQueue.length - 1) {
       setState(() {
         _currentIndex++;
         _answered = false;
@@ -134,8 +170,53 @@ class _QuizScreenState extends State<QuizScreen> {
       });
       _focusNode.requestFocus();
     } else {
-      // Alle Vokabeln abgefragt → Ergebnis zeigen
-      _showResults();
+      // Hauptliste fertig
+      if (_retryQueue.isNotEmpty) {
+        // Wiederholungstopf starten
+        _retryQueue.shuffle();
+        setState(() {
+          _inRetryMode = true;
+          _currentIndex = 0;
+          _answered = false;
+          _wasCorrect = false;
+          _isNearlyCorrect = false;
+          _userInput = '';
+          _inputController.clear();
+          _randomizeDirection();
+        });
+        _focusNode.requestFocus();
+        // Hinweis anzeigen
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '🔄 Wiederholung: ${_retryQueue.length} falsch beantwortete Vokabeln – '
+              'jetzt so lange bis alle richtig sind!',
+            ),
+            backgroundColor: const Color(0xFFE74C3C),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      } else {
+        _showResults();
+      }
+    }
+  }
+
+  void _skipCard() {
+    setState(() {
+      _userInput = '';
+      _inputController.clear();
+      _answered = true;
+      _wasCorrect = false;
+    });
+    _updateSrs(false);
+    DatabaseService.recordDailyReview(wasCorrect: false);
+    _wrongCount++;
+
+    // Übersprungene Karte auch in Wiederholungstopf
+    if (!_inRetryMode) {
+      final alreadyInRetry = _retryQueue.any((v) => v.id == _current.id);
+      if (!alreadyInRetry) _retryQueue.add(_current);
     }
   }
 
@@ -149,10 +230,8 @@ class _QuizScreenState extends State<QuizScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: const Color(0xFF16213E),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text(
-          '🎉 Lerneinheit abgeschlossen!',
-          style: TextStyle(color: Colors.white),
-        ),
+        title: const Text('🎉 Lerneinheit abgeschlossen!',
+            style: TextStyle(color: Colors.white)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -166,10 +245,8 @@ class _QuizScreenState extends State<QuizScreen> {
                     : const Color(0xFFE74C3C),
               ),
             ),
-            Text(
-              '$_correctCount von $total richtig',
-              style: const TextStyle(color: Colors.white70, fontSize: 16),
-            ),
+            Text('$_correctCount von $total richtig',
+                style: const TextStyle(color: Colors.white70, fontSize: 16)),
             const SizedBox(height: 10),
             Text(
               percent >= 80
@@ -184,13 +261,11 @@ class _QuizScreenState extends State<QuizScreen> {
         actions: [
           TextButton(
             onPressed: () {
-              Navigator.pop(context); // Dialog schließen
-              Navigator.pop(context); // Quiz-Screen schließen
+              Navigator.pop(context);
+              Navigator.pop(context);
             },
-            child: const Text(
-              'Zurück zur Übersicht',
-              style: TextStyle(color: Color(0xFF4ECDC4)),
-            ),
+            child: const Text('Zurück zur Übersicht',
+                style: TextStyle(color: Color(0xFF4ECDC4))),
           ),
         ],
       ),
@@ -206,7 +281,7 @@ class _QuizScreenState extends State<QuizScreen> {
       );
     }
 
-    if (_queue.isEmpty) {
+    if (_mainQueue.isEmpty) {
       return Scaffold(
         backgroundColor: const Color(0xFF1A1A2E),
         appBar: AppBar(
@@ -229,18 +304,32 @@ class _QuizScreenState extends State<QuizScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
         iconTheme: const IconThemeData(color: Colors.white),
-        title: Text(
-          '${_currentIndex + 1} / ${_queue.length}',
-          style: const TextStyle(color: Colors.white70, fontSize: 16),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _inRetryMode
+                  ? '🔄 Wiederholung ${_currentIndex + 1}/${_retryQueue.length}'
+                  : '${_currentIndex + 1} / ${_mainQueue.length}',
+              style: const TextStyle(color: Colors.white70, fontSize: 15),
+            ),
+            if (_retryQueue.isNotEmpty && !_inRetryMode)
+              Text(
+                '${_retryQueue.length} im Wiederholungstopf',
+                style: const TextStyle(color: Color(0xFFE74C3C), fontSize: 11),
+              ),
+          ],
         ),
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 16),
             child: Row(
               children: [
-                Text('✅ $_correctCount', style: const TextStyle(color: Color(0xFF2ECC71))),
+                Text('✅ $_correctCount',
+                    style: const TextStyle(color: Color(0xFF2ECC71))),
                 const SizedBox(width: 10),
-                Text('❌ $_wrongCount', style: const TextStyle(color: Color(0xFFE74C3C))),
+                Text('❌ $_wrongCount',
+                    style: const TextStyle(color: Color(0xFFE74C3C))),
               ],
             ),
           ),
@@ -253,29 +342,44 @@ class _QuizScreenState extends State<QuizScreen> {
             children: [
               // Fortschrittsbalken
               LinearProgressIndicator(
-                value: (_currentIndex + 1) / _queue.length,
+                value: _inRetryMode
+                    ? 1.0
+                    : (_currentIndex + 1) / _mainQueue.length,
                 backgroundColor: Colors.white12,
-                valueColor: const AlwaysStoppedAnimation(Color(0xFF4ECDC4)),
+                valueColor: AlwaysStoppedAnimation(
+                  _inRetryMode
+                      ? const Color(0xFFE74C3C)
+                      : const Color(0xFF4ECDC4),
+                ),
                 borderRadius: BorderRadius.circular(4),
               ),
-              const SizedBox(height: 30),
 
-              // Richtungsanzeige (DE→EN oder EN→DE)
+              if (_inRetryMode)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    'Wiederholungstopf – noch ${_retryQueue.length} Vokabeln',
+                    style: const TextStyle(
+                        color: Color(0xFFE74C3C), fontSize: 12),
+                  ),
+                ),
+
+              const SizedBox(height: 24),
+
+              // Richtungsanzeige
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: Colors.white.withOpacity(0.08),
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: Text(
-                  _directionLabel,
-                  style: const TextStyle(color: Colors.white70, fontSize: 14),
-                ),
+                child: Text(_directionLabel,
+                    style: const TextStyle(color: Colors.white70, fontSize: 14)),
               ),
 
               const SizedBox(height: 24),
 
-              // Die Fragevokabel
+              // Fragevokabel
               Expanded(
                 flex: 2,
                 child: Center(
@@ -292,7 +396,6 @@ class _QuizScreenState extends State<QuizScreen> {
                         ),
                         textAlign: TextAlign.center,
                       ),
-                      // Beispielsatz anzeigen (nur nach Beantwortung)
                       if (_answered && _current.example != null) ...[
                         const SizedBox(height: 16),
                         Text(
@@ -310,13 +413,11 @@ class _QuizScreenState extends State<QuizScreen> {
                 ),
               ),
 
-              // Ergebnisanzeige nach Beantwortung
               if (_answered) ...[
                 _buildResultCard(),
                 const SizedBox(height: 16),
               ],
 
-              // Eingabefeld
               if (!_answered) ...[
                 TextField(
                   controller: _inputController,
@@ -344,7 +445,6 @@ class _QuizScreenState extends State<QuizScreen> {
                 const SizedBox(height: 16),
               ],
 
-              // Aktionsbutton
               SizedBox(
                 width: double.infinity,
                 height: 52,
@@ -361,7 +461,11 @@ class _QuizScreenState extends State<QuizScreen> {
                     ),
                   ),
                   child: Text(
-                    _answered ? 'Weiter →' : 'Prüfen ✓',
+                    _answered
+                        ? (_inRetryMode && !_wasCorrect
+                            ? 'Nochmal versuchen →'
+                            : 'Weiter →')
+                        : 'Prüfen ✓',
                     style: const TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.bold,
@@ -373,24 +477,11 @@ class _QuizScreenState extends State<QuizScreen> {
 
               const SizedBox(height: 12),
 
-              // Überspringen-Button
               if (!_answered)
                 TextButton(
-                  onPressed: () {
-                    setState(() {
-                      _userInput = '';
-                      _inputController.clear();
-                      _answered = true;
-                      _wasCorrect = false;
-                    });
-                    _updateSrs(false);
-                    DatabaseService.recordDailyReview(wasCorrect: false);
-                    _wrongCount++;
-                  },
-                  child: const Text(
-                    'Überspringen',
-                    style: TextStyle(color: Colors.white38),
-                  ),
+                  onPressed: _skipCard,
+                  child: const Text('Überspringen',
+                      style: TextStyle(color: Colors.white38)),
                 ),
             ],
           ),
@@ -422,7 +513,9 @@ class _QuizScreenState extends State<QuizScreen> {
               Text(
                 _wasCorrect ? '✅ Richtig!' : '❌ Falsch!',
                 style: TextStyle(
-                  color: _wasCorrect ? const Color(0xFF2ECC71) : const Color(0xFFE74C3C),
+                  color: _wasCorrect
+                      ? const Color(0xFF2ECC71)
+                      : const Color(0xFFE74C3C),
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
                 ),
@@ -430,33 +523,31 @@ class _QuizScreenState extends State<QuizScreen> {
               if (_isNearlyCorrect && !_wasCorrect)
                 const Padding(
                   padding: EdgeInsets.only(left: 8),
-                  child: Text(
-                    '(fast richtig!)',
-                    style: TextStyle(color: Colors.orange, fontSize: 12),
-                  ),
+                  child: Text('(fast richtig!)',
+                      style: TextStyle(color: Colors.orange, fontSize: 12)),
+                ),
+              if (!_wasCorrect && _inRetryMode)
+                const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: Text('→ nochmal',
+                      style: TextStyle(color: Color(0xFFE74C3C), fontSize: 12)),
                 ),
             ],
           ),
           const SizedBox(height: 8),
-          Text(
-            'Korrekte Antwort:',
-            style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12),
-          ),
+          Text('Korrekte Antwort:',
+              style: TextStyle(
+                  color: Colors.white.withOpacity(0.5), fontSize: 12)),
           const SizedBox(height: 4),
           Text(
             _correctAnswers.join(' / '),
             style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-            ),
+                color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
           ),
           if (!_wasCorrect && _userInput.isNotEmpty) ...[
             const SizedBox(height: 4),
-            Text(
-              'Deine Antwort: $_userInput',
-              style: const TextStyle(color: Colors.white38, fontSize: 13),
-            ),
+            Text('Deine Antwort: $_userInput',
+                style: const TextStyle(color: Colors.white38, fontSize: 13)),
           ],
         ],
       ),

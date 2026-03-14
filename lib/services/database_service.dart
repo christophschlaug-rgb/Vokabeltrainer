@@ -1,6 +1,4 @@
 // lib/services/database_service.dart
-// Lokale SQLite-Datenbank für Vokabeln und Lernstatus
-
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import '../models/vocabulary.dart';
@@ -8,7 +6,6 @@ import '../models/vocabulary.dart';
 class DatabaseService {
   static Database? _db;
 
-  // Singleton: nur eine Datenbankinstanz
   static Future<Database> get database async {
     _db ??= await _initDatabase();
     return _db!;
@@ -20,92 +17,125 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: (db, version) async {
-        // Tabelle für Vokabeln erstellen
-        await db.execute('''
-          CREATE TABLE vocabularies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            word_en TEXT NOT NULL,
-            word_de TEXT NOT NULL,
-            example TEXT,
-            level TEXT,
-            success_streak INTEGER DEFAULT 0,
-            total_correct INTEGER DEFAULT 0,
-            total_wrong INTEGER DEFAULT 0,
-            next_review_date TEXT NOT NULL,
-            last_result TEXT,
-            last_review_date TEXT
-          )
-        ''');
-
-        // Tabelle für App-Einstellungen (z.B. letzter Lerntag)
-        await db.execute('''
-          CREATE TABLE settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-          )
-        ''');
-
-        // Tabelle für Lernstatistiken pro Tag
-        await db.execute('''
-          CREATE TABLE daily_stats (
-            date TEXT PRIMARY KEY,
-            cards_reviewed INTEGER DEFAULT 0,
-            cards_correct INTEGER DEFAULT 0,
-            cards_wrong INTEGER DEFAULT 0
-          )
-        ''');
+        await _createTables(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          // Neue Spalten für Schwierigkeitsgrad-Sortierung
+          await db.execute('ALTER TABLE vocabularies ADD COLUMN sort_order INTEGER DEFAULT 9999');
+          await db.execute('UPDATE vocabularies SET sort_order = id');
+        }
       },
     );
   }
 
+  static Future<void> _createTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE vocabularies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        word_en TEXT NOT NULL,
+        word_de TEXT NOT NULL,
+        example TEXT,
+        level TEXT,
+        sort_order INTEGER DEFAULT 9999,
+        success_streak INTEGER DEFAULT 0,
+        total_correct INTEGER DEFAULT 0,
+        total_wrong INTEGER DEFAULT 0,
+        next_review_date TEXT NOT NULL,
+        last_result TEXT,
+        last_review_date TEXT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE daily_stats (
+        date TEXT PRIMARY KEY,
+        cards_reviewed INTEGER DEFAULT 0,
+        cards_correct INTEGER DEFAULT 0,
+        cards_wrong INTEGER DEFAULT 0
+      )
+    ''');
+  }
+
   // ─── Vokabeln ────────────────────────────────────────────────
 
-  /// Alle Vokabeln laden
   static Future<List<Vocabulary>> getAllVocabularies() async {
     final db = await database;
     final maps = await db.query('vocabularies');
     return maps.map((m) => Vocabulary.fromMap(m)).toList();
   }
 
-  /// Heute fällige Vokabeln laden (bis zu [limit] Stück)
-  static Future<List<Vocabulary>> getDueVocabularies({int limit = 100}) async {
+  /// Alle Vokabeln für die Wörterbuch-Ansicht, sortiert nach sort_order
+  static Future<List<Vocabulary>> getAllVocabulariesSorted() async {
     final db = await database;
-    final today = DateTime.now().toIso8601String();
-
-    // Alle Vokabeln deren nextReviewDate heute oder früher ist
     final maps = await db.query(
       'vocabularies',
-      where: 'next_review_date <= ?',
-      whereArgs: [today],
-      orderBy: 'next_review_date ASC',
-      limit: limit,
+      orderBy: 'sort_order ASC, word_en ASC',
+    );
+    return maps.map((m) => Vocabulary.fromMap(m)).toList();
+  }
+
+  /// Suche in Vokabeln (EN oder DE)
+  static Future<List<Vocabulary>> searchVocabularies(String query) async {
+    final db = await database;
+    final q = '%${query.trim().toLowerCase()}%';
+    final maps = await db.rawQuery(
+      '''SELECT * FROM vocabularies
+         WHERE LOWER(word_en) LIKE ? OR LOWER(word_de) LIKE ?
+         ORDER BY sort_order ASC, word_en ASC
+         LIMIT 200''',
+      [q, q],
+    );
+    return maps.map((m) => Vocabulary.fromMap(m)).toList();
+  }
+
+  /// Heute fällige Vokabeln laden — KEINE Duplikate, nach sort_order sortiert
+  static Future<List<Vocabulary>> getDueVocabularies({int limit = 50}) async {
+    final db = await database;
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+
+    // Nur Vokabeln die heute oder früher fällig sind, geordnet nach Schwierigkeit
+    // next_review_date als Datum (erste 10 Zeichen) vergleichen um Duplikate zu vermeiden
+    final maps = await db.rawQuery(
+      '''SELECT * FROM vocabularies
+         WHERE SUBSTR(next_review_date, 1, 10) <= ?
+         ORDER BY sort_order ASC, next_review_date ASC
+         LIMIT ?''',
+      [today, limit],
     );
 
     final list = maps.map((m) => Vocabulary.fromMap(m)).toList();
-    // Reihenfolge mischen
-    list.shuffle();
+    list.shuffle(); // Reihenfolge mischen aber Limit respektieren
     return list;
   }
 
-  /// Vokabeln massenhaft einfügen (beim ersten Laden)
   static Future<void> insertVocabularies(List<Vocabulary> vocabs) async {
     final db = await database;
     final batch = db.batch();
 
-    for (final vocab in vocabs) {
-      // Nur einfügen wenn noch nicht vorhanden (nach englischem Wort prüfen)
+    for (int i = 0; i < vocabs.length; i++) {
+      final v = vocabs[i];
+      // sort_order = Position in der Liste = Häufigkeit/Schwierigkeit
+      final map = v.toMap();
+      map['sort_order'] = i;
       batch.insert(
         'vocabularies',
-        vocab.toMap(),
+        map,
         conflictAlgorithm: ConflictAlgorithm.ignore,
       );
     }
     await batch.commit(noResult: true);
   }
 
-  /// Vokabel-Lernstatus aktualisieren
   static Future<void> updateVocabulary(Vocabulary vocab) async {
     final db = await database;
     await db.update(
@@ -116,19 +146,17 @@ class DatabaseService {
     );
   }
 
-  /// Anzahl aller gespeicherten Vokabeln
   static Future<int> getVocabularyCount() async {
     final db = await database;
     final result = await db.rawQuery('SELECT COUNT(*) as count FROM vocabularies');
     return result.first['count'] as int;
   }
 
-  /// Anzahl heute fälliger Vokabeln
   static Future<int> getDueCount() async {
     final db = await database;
-    final today = DateTime.now().toIso8601String();
+    final today = DateTime.now().toIso8601String().substring(0, 10);
     final result = await db.rawQuery(
-      'SELECT COUNT(*) as count FROM vocabularies WHERE next_review_date <= ?',
+      "SELECT COUNT(*) as count FROM vocabularies WHERE SUBSTR(next_review_date,1,10) <= ?",
       [today],
     );
     return result.first['count'] as int;
@@ -138,11 +166,7 @@ class DatabaseService {
 
   static Future<String?> getSetting(String key) async {
     final db = await database;
-    final result = await db.query(
-      'settings',
-      where: 'key = ?',
-      whereArgs: [key],
-    );
+    final result = await db.query('settings', where: 'key = ?', whereArgs: [key]);
     if (result.isEmpty) return null;
     return result.first['value'] as String;
   }
@@ -156,11 +180,18 @@ class DatabaseService {
     );
   }
 
+  static Future<int> getDailyLimit() async {
+    final val = await getSetting('daily_limit');
+    return int.tryParse(val ?? '50') ?? 50;
+  }
+
+  static Future<void> setDailyLimit(int limit) async {
+    await setSetting('daily_limit', limit.toString());
+  }
+
   // ─── Tagesstatistiken ──────────────────────────────────────
 
-  static Future<void> recordDailyReview({
-    required bool wasCorrect,
-  }) async {
+  static Future<void> recordDailyReview({required bool wasCorrect}) async {
     final db = await database;
     final today = DateTime.now().toIso8601String().substring(0, 10);
 
@@ -175,7 +206,6 @@ class DatabaseService {
           wasCorrect ? 1 : 0, wasCorrect ? 0 : 1]);
   }
 
-  /// Lerntage in Folge berechnen (Streak)
   static Future<int> getLearningStreak() async {
     final db = await database;
     final results = await db.query(
@@ -191,10 +221,8 @@ class DatabaseService {
     DateTime checkDate = DateTime.now();
 
     for (final row in results) {
-      final dateStr = row['date'] as String;
-      final date = DateTime.parse(dateStr);
+      final date = DateTime.parse(row['date'] as String);
       final diff = checkDate.difference(date).inDays;
-
       if (diff <= 1) {
         streak++;
         checkDate = date;
@@ -205,19 +233,12 @@ class DatabaseService {
     return streak;
   }
 
-  /// Statistiken für heute
   static Future<Map<String, int>> getTodayStats() async {
     final db = await database;
     final today = DateTime.now().toIso8601String().substring(0, 10);
-    final result = await db.query(
-      'daily_stats',
-      where: 'date = ?',
-      whereArgs: [today],
-    );
+    final result = await db.query('daily_stats', where: 'date = ?', whereArgs: [today]);
 
-    if (result.isEmpty) {
-      return {'reviewed': 0, 'correct': 0, 'wrong': 0};
-    }
+    if (result.isEmpty) return {'reviewed': 0, 'correct': 0, 'wrong': 0};
 
     return {
       'reviewed': result.first['cards_reviewed'] as int,
