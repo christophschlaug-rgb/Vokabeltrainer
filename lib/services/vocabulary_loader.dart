@@ -1,257 +1,169 @@
 // lib/services/vocabulary_loader.dart
-// Lädt das TU Chemnitz Wörterbuch (GNU GPL 2.0+)
 //
-// WICHTIG zur URL:
-//   ftp.tu-chemnitz.de ist ein FTP-Spiegel ohne HTTPS-Zertifikat.
-//   Die URL muss http:// sein — HTTPS schlägt mit SSL-Fehler fehl.
-//   HTTP ist in network_security_config.xml für diese Domain explizit erlaubt.
+// STRATEGIE:
+//   1. App startet sofort mit 2296 eingebetteten Vokabeln (kein Internet nötig)
+//   2. Im Hintergrund wird das TU Chemnitz Wörterbuch geladen (15000 Einträge)
+//   3. URL ist HTTP — ftp.tu-chemnitz.de hat kein HTTPS-Zertifikat
+//   4. HTTP ist in network_security_config.xml für diese Domain explizit erlaubt
 
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/vocabulary.dart';
 import 'database_service.dart';
+import 'builtin_vocabulary.dart';
 
 class VocabularyLoader {
-  // HTTP (nicht HTTPS) — ftp.tu-chemnitz.de hat kein HTTPS-Zertifikat
+  // HTTP — ftp.tu-chemnitz.de unterstützt kein HTTPS
   static const String _dictUrl =
       'http://ftp.tu-chemnitz.de/pub/Local/urz/ding/de-en/de-en.txt';
 
-  // Fallback-URL falls der Hauptserver nicht erreichbar ist
-  static const String _mirrorUrl =
-      'http://www.dict.cc/translation_files/download_ding.php';
-
   static const int _maxEntries = 15000;
-  static const int _maxResponseBytes = 25 * 1024 * 1024; // 25 MB Sicherheitslimit
+  static const int _maxBytes = 25 * 1024 * 1024;
 
-  /// Vokabeln laden, deduplizieren und speichern.
-  /// Bestehender Lernfortschritt bleibt erhalten.
+  /// Hauptfunktion: erst eingebettete Wörter laden, dann Online-Download.
   static Future<int> loadAndSaveVocabularies({
     void Function(String status)? onStatus,
   }) async {
-    onStatus?.call('Verbinde mit Wörterbuch-Server...');
+    // Schritt 1: Eingebettete Wörter sofort speichern (offline-sicher)
+    final builtinCount = await _saveBuiltin(onStatus: onStatus);
 
-    List<Vocabulary> vocabs = [];
-    String? errorMsg;
-
-    // Versuch 1: TU Chemnitz (primär)
+    // Schritt 2: Online-Download versuchen (erweitert auf 15000)
+    onStatus?.call('Versuche Online-Download (~8 MB)...');
     try {
-      vocabs = await _downloadAndParse(_dictUrl, onStatus: onStatus);
-    } catch (e) {
-      errorMsg = e.toString();
-      onStatus?.call('Primärer Server nicht erreichbar.\nPrüfe Internetverbindung...');
-    }
-
-    // Wenn Download fehlgeschlagen: vorhandene DB behalten
-    if (vocabs.isEmpty) {
-      final existing = await DatabaseService.getVocabularyCount();
-      if (existing > 0) {
-        onStatus?.call(
-          '⚠️ Download fehlgeschlagen ($errorMsg).\n'
-          'Vorhandene $existing Vokabeln bleiben erhalten.\n'
-          'Bitte "Neu laden" antippen wenn WLAN verfügbar.',
-        );
-        return existing;
+      final downloaded = await _downloadAndSave(onStatus: onStatus);
+      if (downloaded > builtinCount) {
+        onStatus?.call('✅ $downloaded Vokabeln verfügbar (Online-Wörterbuch).');
+        return downloaded;
       }
-      // Absoluter Notfall: noch keine DB und kein Netz
-      onStatus?.call('Kein Internet — lade 50 Offline-Vokabeln...');
-      vocabs = _getBuiltinFallback();
+    } catch (e) {
+      onStatus?.call(
+        '⚠️ Online-Download fehlgeschlagen: $e\n'
+        'Die App läuft mit $builtinCount eingebetteten Vokabeln.\n'
+        'Tippe "Neu laden" wenn WLAN verfügbar.',
+      );
     }
-
-    onStatus?.call('Speichere ${vocabs.length} Vokabeln (ohne Duplikate)...');
-    await DatabaseService.replaceAllVocabularies(vocabs);
 
     final total = await DatabaseService.getVocabularyCount();
-    onStatus?.call('✅ Fertig! $total Vokabeln verfügbar.');
+    onStatus?.call('✅ $total Vokabeln verfügbar.');
     return total;
   }
 
-  static Future<List<Vocabulary>> _downloadAndParse(
-    String url, {
-    void Function(String status)? onStatus,
-  }) async {
-    onStatus?.call('Lade Wörterbuch herunter (~8 MB)...\nBitte 1–2 Minuten warten.');
+  /// Eingebettete Wörter aus builtin_vocabulary.dart speichern
+  static Future<int> _saveBuiltin({void Function(String)? onStatus}) async {
+    onStatus?.call('Lade eingebettete Vokabeln...');
+    final vocabs = BuiltinVocabulary.entries.map((e) =>
+      Vocabulary(wordEn: e[0], wordDe: e[1], level: 'builtin')
+    ).toList();
+
+    await DatabaseService.replaceAllVocabularies(vocabs);
+    final count = await DatabaseService.getVocabularyCount();
+    onStatus?.call('$count eingebettete Vokabeln geladen.');
+    return count;
+  }
+
+  /// Online-Download vom TU Chemnitz Server
+  static Future<int> _downloadAndSave({void Function(String)? onStatus}) async {
+    onStatus?.call('Verbinde mit ftp.tu-chemnitz.de (HTTP)...');
 
     final client = http.Client();
     try {
-      final request = http.Request('GET', Uri.parse(url));
-      // Kein Accept-Encoding: verhindert Probleme mit komprimierten Antworten
+      final request = http.Request('GET', Uri.parse(_dictUrl));
       request.headers['Accept-Encoding'] = 'identity';
+      request.headers['User-Agent'] = 'VokabelTrainer/1.0';
 
-      final response = await client
+      final streamed = await client
           .send(request)
           .timeout(const Duration(seconds: 180));
 
-      if (response.statusCode != 200) {
-        throw Exception('HTTP-Fehler: ${response.statusCode}');
+      if (streamed.statusCode != 200) {
+        throw Exception('HTTP ${streamed.statusCode}');
       }
 
-      // Sicherheit: max. 25 MB einlesen
       final bytes = <int>[];
-      int lastReport = 0;
-      await for (final chunk in response.stream) {
+      int lastMb = 0;
+      await for (final chunk in streamed.stream) {
         bytes.addAll(chunk);
-        // Fortschritt melden
         final mb = bytes.length ~/ (1024 * 1024);
-        if (mb > lastReport) {
-          lastReport = mb;
-          onStatus?.call('Lade Wörterbuch... ${mb} MB heruntergeladen');
+        if (mb > lastMb) {
+          lastMb = mb;
+          onStatus?.call('Lade... $mb MB');
         }
-        if (bytes.length > _maxResponseBytes) break;
+        if (bytes.length > _maxBytes) break;
       }
 
-      onStatus?.call('${(bytes.length / 1024 / 1024).toStringAsFixed(1)} MB geladen. Verarbeite...');
+      onStatus?.call('${lastMb} MB geladen. Verarbeite Einträge...');
 
-      // Datei ist Latin-1 kodiert
-      String rawText;
+      String text;
       try {
-        rawText = latin1.decode(bytes);
+        text = latin1.decode(bytes);
       } catch (_) {
-        rawText = utf8.decode(bytes, allowMalformed: true);
+        text = utf8.decode(bytes, allowMalformed: true);
       }
 
-      return _parseDingFormat(rawText, onStatus: onStatus);
+      final vocabs = _parse(text, onStatus: onStatus);
+      if (vocabs.length < 100) {
+        throw Exception('Zu wenige Einträge: ${vocabs.length}');
+      }
+
+      await DatabaseService.replaceAllVocabularies(vocabs);
+      final total = await DatabaseService.getVocabularyCount();
+      return total;
     } finally {
       client.close();
     }
   }
 
-  static List<Vocabulary> _parseDingFormat(
-    String text, {
-    void Function(String status)? onStatus,
-  }) {
+  static List<Vocabulary> _parse(String text, {void Function(String)? onStatus}) {
     final vocabs = <Vocabulary>[];
-    final seenEn = <String>{};  // Duplikat-Prüfung
-    int skipped = 0;
+    final seen = <String>{};
 
-    final lines = text.split('\n');
-    onStatus?.call('Verarbeite ${lines.length} Zeilen...');
-
-    for (final rawLine in lines) {
+    for (final raw in text.split('\n')) {
       if (vocabs.length >= _maxEntries) break;
-
-      final line = rawLine.trim();
+      final line = raw.trim();
       if (line.isEmpty || line.startsWith('#')) continue;
 
-      final sepIdx = line.indexOf(' :: ');
-      if (sepIdx < 0) continue;
+      final sep = line.indexOf(' :: ');
+      if (sep < 0) continue;
 
-      final dePart = line.substring(0, sepIdx).trim();
-      final enPart = line.substring(sepIdx + 4).trim();
-      if (dePart.isEmpty || enPart.isEmpty) continue;
+      final de = _clean(line.substring(0, sep));
+      final en = _clean(line.substring(sep + 4));
+      if (de.isEmpty || en.isEmpty) continue;
+      if (!_ok(en, de)) continue;
 
-      final wordDe = _extractBestTerm(dePart);
-      final wordEn = _extractBestTerm(enPart);
-      if (wordDe.isEmpty || wordEn.isEmpty) { skipped++; continue; }
+      final key = en.split('|').first.trim().toLowerCase();
+      if (seen.contains(key)) continue;
+      seen.add(key);
 
-      if (!_passesQualityFilter(wordEn, wordDe)) { skipped++; continue; }
+      vocabs.add(Vocabulary(wordEn: en, wordDe: de, level: 'DE-EN'));
 
-      // Duplikat-Check per normalisiertem Schlüssel
-      final key = wordEn.split('|').first.trim().toLowerCase();
-      if (seenEn.contains(key)) { skipped++; continue; }
-      seenEn.add(key);
-
-      vocabs.add(Vocabulary(wordEn: wordEn, wordDe: wordDe, level: 'DE-EN'));
-
-      if (vocabs.length % 2000 == 0) {
-        onStatus?.call('${vocabs.length} Einträge gesammelt...');
+      if (vocabs.length % 3000 == 0) {
+        onStatus?.call('${vocabs.length} Einträge verarbeitet...');
       }
     }
-
-    onStatus?.call('${vocabs.length} Einträge ausgewählt ($skipped gefiltert/übersprungen).');
     return vocabs;
   }
 
-  static bool _passesQualityFilter(String en, String de) {
-    final enFirst = en.split('|').first;
-    final deFirst = de.split('|').first;
-    if (enFirst.length < 3 || deFirst.length < 3) return false;
-
-    final badChars = RegExp(r'[<>=\+\*\^\$\\]');
-    if (badChars.hasMatch(enFirst) || badChars.hasMatch(deFirst)) return false;
-
-    if (enFirst == enFirst.toUpperCase() &&
-        enFirst.length <= 4 &&
-        !enFirst.contains(' ')) return false;
-
-    if (RegExp(r'^\d+$').hasMatch(enFirst)) return false;
-    if (enFirst.split(' ').length > 5) return false;
-
+  static bool _ok(String en, String de) {
+    final e = en.split('|').first;
+    final d = de.split('|').first;
+    if (e.length < 3 || d.length < 3) return false;
+    if (RegExp(r'[<>=+*^$\\]').hasMatch(e)) return false;
+    if (e == e.toUpperCase() && e.length <= 4 && !e.contains(' ')) return false;
+    if (RegExp(r'^\d+$').hasMatch(e)) return false;
+    if (e.split(' ').length > 5) return false;
     return true;
   }
 
-  static String _extractBestTerm(String raw) {
-    final cleaned = raw
-        .replaceAll(RegExp(r'\[.*?\]'), '')
-        .replaceAll(RegExp(r'\{[^}]*\}'), '')
-        .replaceAll(RegExp(r'\([^)]*\)'), '');
-
-    final parts = cleaned
-        .split(';')
-        .map((s) => s.trim())
-        .where((s) => s.isNotEmpty && s.length >= 2)
-        .where((s) => s.split(' ').length <= 4)
-        .where((s) => !s.contains('/'))
-        .where((s) => !s.contains('\\'))
-        .take(3)
-        .toList();
-
-    if (parts.isEmpty) return '';
+  static String _clean(String raw) {
+    var s = raw
+      .replaceAll(RegExp(r'\[.*?\]'), '')
+      .replaceAll(RegExp(r'\{[^}]*\}'), '')
+      .replaceAll(RegExp(r'\([^)]*\)'), '');
+    final parts = s.split(';')
+      .map((x) => x.trim())
+      .where((x) => x.length >= 2 && x.split(' ').length <= 4
+                    && !x.contains('/') && !x.contains('\\'))
+      .take(3).toList();
     return parts.join('|');
-  }
-
-  // 50 Offline-Vokabeln — NUR wenn absolut kein Internet vorhanden
-  static List<Vocabulary> _getBuiltinFallback() {
-    return [
-      Vocabulary(wordEn: 'to achieve', wordDe: 'erreichen|erzielen', level: 'C1'),
-      Vocabulary(wordEn: 'to acknowledge', wordDe: 'anerkennen|bestätigen', level: 'C1'),
-      Vocabulary(wordEn: 'adequate', wordDe: 'angemessen|ausreichend', level: 'C1'),
-      Vocabulary(wordEn: 'to advocate', wordDe: 'befürworten|eintreten für', level: 'C1'),
-      Vocabulary(wordEn: 'ambiguous', wordDe: 'mehrdeutig|zweideutig', level: 'C1'),
-      Vocabulary(wordEn: 'to analyze', wordDe: 'analysieren|untersuchen', level: 'C1'),
-      Vocabulary(wordEn: 'to anticipate', wordDe: 'vorwegnehmen|erwarten', level: 'C1'),
-      Vocabulary(wordEn: 'compelling', wordDe: 'überzeugend|zwingend', level: 'C1'),
-      Vocabulary(wordEn: 'comprehensive', wordDe: 'umfassend|vollständig', level: 'C1'),
-      Vocabulary(wordEn: 'crucial', wordDe: 'entscheidend|wesentlich', level: 'C1'),
-      Vocabulary(wordEn: 'to enhance', wordDe: 'verbessern|steigern', level: 'C1'),
-      Vocabulary(wordEn: 'to evaluate', wordDe: 'auswerten|bewerten', level: 'C1'),
-      Vocabulary(wordEn: 'to facilitate', wordDe: 'erleichtern|fördern', level: 'C1'),
-      Vocabulary(wordEn: 'fundamental', wordDe: 'grundlegend|fundamental', level: 'C1'),
-      Vocabulary(wordEn: 'to implement', wordDe: 'umsetzen|implementieren', level: 'C1'),
-      Vocabulary(wordEn: 'inevitable', wordDe: 'unvermeidlich|unvermeidbar', level: 'C1'),
-      Vocabulary(wordEn: 'to integrate', wordDe: 'integrieren|eingliedern', level: 'C1'),
-      Vocabulary(wordEn: 'to maintain', wordDe: 'aufrechterhalten|pflegen', level: 'C1'),
-      Vocabulary(wordEn: 'to mitigate', wordDe: 'abschwächen|lindern', level: 'C1'),
-      Vocabulary(wordEn: 'to perceive', wordDe: 'wahrnehmen|erkennen', level: 'C1'),
-      Vocabulary(wordEn: 'perspective', wordDe: 'Perspektive|Sichtweise', level: 'C1'),
-      Vocabulary(wordEn: 'to prioritize', wordDe: 'priorisieren|vorrangig behandeln', level: 'C1'),
-      Vocabulary(wordEn: 'to regulate', wordDe: 'regulieren|kontrollieren', level: 'C1'),
-      Vocabulary(wordEn: 'significant', wordDe: 'bedeutend|erheblich', level: 'C1'),
-      Vocabulary(wordEn: 'sophisticated', wordDe: 'ausgereift|anspruchsvoll', level: 'C1'),
-      Vocabulary(wordEn: 'to sustain', wordDe: 'aufrechterhalten|stützen', level: 'C1'),
-      Vocabulary(wordEn: 'systematic', wordDe: 'systematisch|methodisch', level: 'C1'),
-      Vocabulary(wordEn: 'to tackle', wordDe: 'angehen|bewältigen', level: 'C1'),
-      Vocabulary(wordEn: 'to transform', wordDe: 'verwandeln|umgestalten', level: 'C1'),
-      Vocabulary(wordEn: 'underlying', wordDe: 'zugrunde liegend|ursächlich', level: 'C1'),
-      Vocabulary(wordEn: 'to undermine', wordDe: 'untergraben|schwächen', level: 'C1'),
-      Vocabulary(wordEn: 'viable', wordDe: 'machbar|lebensfähig', level: 'C1'),
-      Vocabulary(wordEn: 'widespread', wordDe: 'weit verbreitet|weitreichend', level: 'C1'),
-      Vocabulary(wordEn: 'to yield', wordDe: 'ergeben|nachgeben', level: 'C1'),
-      Vocabulary(wordEn: 'coherent', wordDe: 'kohärent|schlüssig', level: 'C1'),
-      Vocabulary(wordEn: 'to contribute', wordDe: 'beitragen|beisteuern', level: 'C1'),
-      Vocabulary(wordEn: 'controversial', wordDe: 'umstritten|kontrovers', level: 'C1'),
-      Vocabulary(wordEn: 'empirical', wordDe: 'empirisch|erfahrungsbasiert', level: 'C1'),
-      Vocabulary(wordEn: 'to establish', wordDe: 'gründen|einrichten', level: 'C1'),
-      Vocabulary(wordEn: 'to overcome', wordDe: 'überwinden|bewältigen', level: 'C1'),
-      Vocabulary(wordEn: 'phenomenon', wordDe: 'Phänomen|Erscheinung', level: 'C1'),
-      Vocabulary(wordEn: 'to promote', wordDe: 'fördern|bewerben', level: 'C1'),
-      Vocabulary(wordEn: 'relevant', wordDe: 'relevant|bedeutsam', level: 'C1'),
-      Vocabulary(wordEn: 'to reinforce', wordDe: 'verstärken|bekräftigen', level: 'C1'),
-      Vocabulary(wordEn: 'to resolve', wordDe: 'lösen|klären', level: 'C1'),
-      Vocabulary(wordEn: 'rigorous', wordDe: 'streng|gründlich', level: 'C1'),
-      Vocabulary(wordEn: 'to seek', wordDe: 'suchen|anstreben', level: 'C1'),
-      Vocabulary(wordEn: 'to utilize', wordDe: 'nutzen|verwenden', level: 'C1'),
-      Vocabulary(wordEn: 'to validate', wordDe: 'bestätigen|validieren', level: 'C1'),
-      Vocabulary(wordEn: 'to verify', wordDe: 'überprüfen|bestätigen', level: 'C1'),
-    ];
   }
 }

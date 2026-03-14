@@ -17,14 +17,14 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await _createTables(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         // Bei jedem Upgrade: Tabellen neu erstellen
         // Lernfortschritt bleibt in settings/daily_stats erhalten
-        if (oldVersion < 4) {
+        if (oldVersion < 5) {
           await db.execute('DROP TABLE IF EXISTS vocabularies');
           await _createVocabTable(db);
           if (oldVersion < 2) {
