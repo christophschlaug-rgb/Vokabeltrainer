@@ -5,6 +5,7 @@ import 'quiz_screen.dart';
 import 'stats_screen.dart';
 import 'dictionary_screen.dart';
 import 'settings_screen.dart';
+import 'scan_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});

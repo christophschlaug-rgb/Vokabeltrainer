@@ -195,6 +195,16 @@ class DatabaseService {
         where: 'id = ?', whereArgs: [vocab.id]);
   }
 
+
+  static Future<void> insertVocabulary(Vocabulary vocab) async {
+    final db = await database;
+    final map = vocab.toMap();
+    map['sort_order'] = 99000; // Neue Scan-Wörter ans Ende
+    map['next_review_date'] = DateTime.now().toIso8601String();
+    await db.insert('vocabularies', map,
+        conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
   // ─── Vokabeln löschen ────────────────────────────────────────
 
   static Future<void> deleteVocabulary(int id) async {

@@ -12,18 +12,24 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # Lokale Datenbank (SQLite) — leichtgewichtig, läuft offline
+  # Lokale Datenbank (SQLite)
   sqflite: ^2.3.2
   path: ^1.9.0
 
-  # HTTP-Anfragen für das Laden der Vokabeln aus dem Internet
+  # HTTP für Vokabel-Download
   http: ^1.2.1
 
   # Datumsformatierung
   intl: ^0.19.0
 
-  # Schöne Icons
+  # Icons
   cupertino_icons: ^1.0.6
+
+  # Kamera und Bildauswahl für Foto-Scan
+  image_picker: ^1.1.2
+
+  # OCR (Texterkennung) — offline, kein API-Key nötig
+  google_mlkit_text_recognition: ^0.13.1
 
 dev_dependencies:
   flutter_test:

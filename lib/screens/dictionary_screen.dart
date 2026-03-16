@@ -61,6 +61,7 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
   }
 
   Future<void> _deleteSingle(Vocabulary v) async {
+    FocusScope.of(context).unfocus();
     final confirm = await _confirmDelete(
       '„${v.wordEn}" löschen?',
       'Diese Vokabel wird dauerhaft entfernt.',
@@ -83,6 +84,7 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
   }
 
   Future<void> _deleteSelected() async {
+    FocusScope.of(context).unfocus();
     final n = _selected.length;
     final confirm = await _confirmDelete(
       '$n Vokabeln löschen?',
@@ -265,6 +267,7 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
                         );
                       },
                       onDismissed: (_) async {
+                        FocusScope.of(context).unfocus();
                         await DatabaseService.deleteVocabulary(v.id!);
                         setState(() => _results.removeAt(i));
                         if (mounted) {
