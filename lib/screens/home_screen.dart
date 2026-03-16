@@ -257,6 +257,25 @@ class _HomeScreenState extends State<HomeScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const ScanScreen()),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white70,
+                      side: BorderSide(color: Colors.white.withOpacity(0.2)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    child: const Text('📷 Buchseite scannen'),
+                  ),
+                ),
+
+                const SizedBox(height: 6),
+
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
                     onPressed: _isLoading ? null : _loadVocabularies,
                     style: OutlinedButton.styleFrom(
                       foregroundColor: _loadingHasError
