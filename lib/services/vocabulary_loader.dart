@@ -8,7 +8,7 @@ import 'builtin_vocabulary.dart';
 class VocabularyLoader {
   // HTTP — ftp.tu-chemnitz.de hat kein gültiges HTTPS-Zertifikat
   // HTTP ist in network_security_config.xml für diese Domain erlaubt
-  static const _url = 'http://ftp.tu-chemnitz.de/pub/Local/urz/ding/de-en/de-en.txt';
+  static const _url = 'http://ftp.tu-chemnitz.de/pub/Local/urz/ding/de-en-devel/de-en.txt';
   static const _max = 15000;
   static const _maxBytes = 25 * 1024 * 1024;
 
