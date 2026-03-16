@@ -299,3 +299,18 @@ class DatabaseService {
     };
   }
 }
+
+  // ─── Vokabel löschen ────────────────────────────────────────
+
+  static Future<void> deleteVocabulary(int id) async {
+    final db = await database;
+    await db.delete('vocabularies', where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> deleteVocabularies(List<int> ids) async {
+    if (ids.isEmpty) return;
+    final db = await database;
+    final placeholders = ids.map((_) => '?').join(',');
+    await db.delete('vocabularies',
+        where: 'id IN ($placeholders)', whereArgs: ids);
+  }
