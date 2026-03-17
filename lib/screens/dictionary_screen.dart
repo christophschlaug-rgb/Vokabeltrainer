@@ -1,4 +1,3 @@
-// lib/screens/dictionary_screen.dart
 import 'package:flutter/material.dart';
 import '../models/vocabulary.dart';
 import '../services/database_service.dart';
@@ -12,40 +11,86 @@ class DictionaryScreen extends StatefulWidget {
 class _DictionaryScreenState extends State<DictionaryScreen> {
   List<Vocabulary> _results = [];
   bool _isLoading = true;
+  bool _isLoadingMore = false;
+  bool _hasMore = true;
   bool _isSearching = false;
   final _searchController = TextEditingController();
+  final _scrollController = ScrollController();
   String _lastQuery = '';
+  int _offset = 0;
+  static const _pageSize = 100;
 
-  // Mehrfachauswahl für Bulk-Löschen
   final Set<int> _selected = {};
   bool _selectionMode = false;
 
   @override
   void initState() {
     super.initState();
-    _loadAll();
+    _loadPage();
+    _scrollController.addListener(_onScroll);
   }
 
   @override
   void dispose() {
     _searchController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  Future<void> _loadAll() async {
-    setState(() { _isLoading = true; _lastQuery = ''; });
-    final all = await DatabaseService.getAllVocabulariesSorted();
-    setState(() { _results = all; _isLoading = false; });
+  void _onScroll() {
+    if (_scrollController.position.pixels >=
+            _scrollController.position.maxScrollExtent - 300 &&
+        !_isLoadingMore &&
+        _hasMore) {
+      _loadMorePages();
+    }
+  }
+
+  Future<void> _loadPage() async {
+    setState(() { _isLoading = true; _offset = 0; _hasMore = true; });
+    final page = await DatabaseService.getVocabulariesPaged(
+        offset: 0, limit: _pageSize, query: '');
+    setState(() {
+      _results = page;
+      _isLoading = false;
+      _hasMore = page.length == _pageSize;
+      _offset = page.length;
+    });
+  }
+
+  Future<void> _loadMorePages() async {
+    if (!_hasMore || _isLoadingMore) return;
+    setState(() => _isLoadingMore = true);
+    final page = await DatabaseService.getVocabulariesPaged(
+        offset: _offset, limit: _pageSize, query: _lastQuery);
+    setState(() {
+      _results.addAll(page);
+      _offset += page.length;
+      _hasMore = page.length == _pageSize;
+      _isLoadingMore = false;
+    });
   }
 
   Future<void> _search(String q) async {
     final query = q.trim();
     if (query == _lastQuery) return;
     _lastQuery = query;
-    if (query.isEmpty) { _loadAll(); return; }
-    setState(() => _isSearching = true);
-    final found = await DatabaseService.searchVocabularies(query);
-    setState(() { _results = found; _isSearching = false; });
+
+    if (query.isEmpty) {
+      _loadPage();
+      return;
+    }
+
+    setState(() { _isSearching = true; _results = []; _offset = 0; _hasMore = false; });
+    // Suche: alle Treffer auf einmal laden (kein Paginierungs-Limit)
+    final found = await DatabaseService.getVocabulariesPaged(
+        offset: 0, limit: 0, query: query);
+    setState(() {
+      _results = found;
+      _offset = found.length;
+      _hasMore = false; // Bei Suche kein weiteres Nachladen nötig
+      _isSearching = false;
+    });
   }
 
   void _toggleSelect(int id) {
@@ -63,23 +108,16 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
   Future<void> _deleteSingle(Vocabulary v) async {
     FocusScope.of(context).unfocus();
     final confirm = await _confirmDelete(
-      '„${v.wordEn}" löschen?',
-      'Diese Vokabel wird dauerhaft entfernt.',
-    );
+        '„${v.wordEn}" löschen?', 'Diese Vokabel wird dauerhaft entfernt.');
     if (!confirm) return;
     await DatabaseService.deleteVocabulary(v.id!);
-    setState(() {
-      _results.remove(v);
-      _selected.remove(v.id);
-    });
+    setState(() => _results.remove(v));
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('„${v.wordEn}" gelöscht'),
-          backgroundColor: const Color(0xFF2ECC71),
-          duration: const Duration(seconds: 2),
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('„${v.wordEn}" gelöscht'),
+        backgroundColor: const Color(0xFF2ECC71),
+        duration: const Duration(seconds: 2),
+      ));
     }
   }
 
@@ -87,9 +125,7 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
     FocusScope.of(context).unfocus();
     final n = _selected.length;
     final confirm = await _confirmDelete(
-      '$n Vokabeln löschen?',
-      'Diese Vokabeln werden dauerhaft entfernt.',
-    );
+        '$n Vokabeln löschen?', 'Diese Vokabeln werden dauerhaft entfernt.');
     if (!confirm) return;
     await DatabaseService.deleteVocabularies(_selected.toList());
     setState(() {
@@ -98,49 +134,44 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
       _selectionMode = false;
     });
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$n Vokabeln gelöscht'),
-          backgroundColor: const Color(0xFF2ECC71),
-          duration: const Duration(seconds: 2),
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('$n Vokabeln gelöscht'),
+        backgroundColor: const Color(0xFF2ECC71),
+        duration: const Duration(seconds: 2),
+      ));
     }
   }
 
-  Future<bool> _confirmDelete(String title, String subtitle) async {
-    return await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            backgroundColor: const Color(0xFF16213E),
-            title: Text(title,
-                style: const TextStyle(color: Colors.white, fontSize: 17)),
-            content: Text(subtitle,
-                style: const TextStyle(color: Colors.white60, fontSize: 14)),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Abbrechen',
-                    style: TextStyle(color: Colors.white54)),
-              ),
-              TextButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('Löschen',
-                    style: TextStyle(
-                        color: Color(0xFFE74C3C),
-                        fontWeight: FontWeight.bold)),
-              ),
-            ],
-          ),
-        ) ??
-        false;
-  }
+  Future<bool> _confirmDelete(String title, String subtitle) async =>
+      await showDialog<bool>(
+            context: context,
+            builder: (_) => AlertDialog(
+              backgroundColor: const Color(0xFF16213E),
+              title: Text(title,
+                  style: const TextStyle(color: Colors.white, fontSize: 17)),
+              content: Text(subtitle,
+                  style: const TextStyle(color: Colors.white60, fontSize: 14)),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Abbrechen',
+                        style: TextStyle(color: Colors.white54))),
+                TextButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('Löschen',
+                        style: TextStyle(
+                            color: Color(0xFFE74C3C),
+                            fontWeight: FontWeight.bold))),
+              ],
+            ),
+          ) ??
+      false;
 
   String _statusLabel(Vocabulary v) {
     if (v.totalCorrect == 0 && v.totalWrong == 0) return 'Neu';
-    if (v.successStreak >= 6) return '⭐ Gelernt';
-    if (v.successStreak >= 3) return '📈 Gut';
-    return '🔁 Üben';
+    if (v.successStreak >= 6) return '⭐';
+    if (v.successStreak >= 3) return '📈';
+    return '🔁';
   }
 
   Color _statusColor(Vocabulary v) {
@@ -166,29 +197,27 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
           if (_selectionMode) ...[
             IconButton(
               icon: const Icon(Icons.select_all, color: Colors.white70),
-              tooltip: 'Alle auswählen',
-              onPressed: () => setState(() {
-                _selected.addAll(_results.map((v) => v.id!));
-              }),
+              onPressed: () =>
+                  setState(() => _selected.addAll(_results.map((v) => v.id!))),
             ),
             IconButton(
-              icon: const Icon(Icons.delete_outline, color: Color(0xFFE74C3C)),
-              tooltip: 'Auswahl löschen',
+              icon: const Icon(Icons.delete_outline,
+                  color: Color(0xFFE74C3C)),
               onPressed: _deleteSelected,
             ),
             IconButton(
               icon: const Icon(Icons.close, color: Colors.white70),
-              onPressed: () => setState(() {
-                _selected.clear();
-                _selectionMode = false;
-              }),
+              onPressed: () =>
+                  setState(() { _selected.clear(); _selectionMode = false; }),
             ),
           ] else
             Padding(
-              padding: const EdgeInsets.only(right: 8),
+              padding: const EdgeInsets.only(right: 12),
               child: Center(
                 child: Text(
-                  '${_results.length} Einträge',
+                  _lastQuery.isEmpty
+                      ? '${_results.length}+ Einträge'
+                      : '${_results.length} Treffer (alle durchsucht)',
                   style: const TextStyle(color: Colors.white38, fontSize: 12),
                 ),
               ),
@@ -234,16 +263,32 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
           ? const Center(
               child: CircularProgressIndicator(color: Color(0xFF4ECDC4)))
           : _results.isEmpty
-              ? const Center(
-                  child: Text('Keine Treffer.',
-                      style: TextStyle(color: Colors.white54)))
+              ? Center(
+                  child: Text(
+                    _lastQuery.isEmpty
+                        ? 'Keine Vokabeln vorhanden.'
+                        : 'Keine Treffer für „$_lastQuery".',
+                    style: const TextStyle(
+                        color: Colors.white54, fontSize: 15),
+                  ),
+                )
               : ListView.builder(
-                  itemCount: _results.length,
+                  controller: _scrollController,
+                  itemCount: _results.length + (_isLoadingMore ? 1 : 0),
                   itemBuilder: (ctx, i) {
+                    if (i == _results.length) {
+                      return const Padding(
+                        padding: EdgeInsets.all(16),
+                        child: Center(
+                          child: CircularProgressIndicator(
+                              color: Color(0xFF4ECDC4), strokeWidth: 2),
+                        ),
+                      );
+                    }
                     final v = _results[i];
                     final isSelected = _selected.contains(v.id);
                     return Dismissible(
-                      key: Key('vocab_${v.id}'),
+                      key: Key('v_${v.id}'),
                       direction: DismissDirection.endToStart,
                       background: Container(
                         alignment: Alignment.centerRight,
@@ -253,7 +298,7 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(Icons.delete_outline,
-                                color: Colors.white, size: 28),
+                                color: Colors.white, size: 26),
                             Text('Löschen',
                                 style: TextStyle(
                                     color: Colors.white, fontSize: 11)),
@@ -261,13 +306,13 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
                         ),
                       ),
                       confirmDismiss: (_) async {
+                        FocusScope.of(context).unfocus();
                         return _confirmDelete(
                           '„${v.wordEn}" löschen?',
                           'Diese Vokabel wird dauerhaft entfernt.',
                         );
                       },
                       onDismissed: (_) async {
-                        FocusScope.of(context).unfocus();
                         await DatabaseService.deleteVocabulary(v.id!);
                         setState(() => _results.removeAt(i));
                         if (mounted) {
@@ -330,7 +375,7 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
                                       Text(_statusLabel(v),
                                           style: TextStyle(
                                               color: _statusColor(v),
-                                              fontSize: 11)),
+                                              fontSize: 13)),
                                       const SizedBox(width: 8),
                                       GestureDetector(
                                         onTap: () => _deleteSingle(v),

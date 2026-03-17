@@ -66,13 +66,11 @@ class _QuizScreenState extends State<QuizScreen> {
       _inRetryMode ? _retryQueue : _mainQueue;
 
   String get _question {
+    // Nur die ERSTE Alternative als Frage anzeigen (verhindert Überlappung mit Eingabefeld)
     if (_askGermanToEnglish) {
-      // Zeige alle deutschen Varianten als Frage
-      final parts = _current.wordDe.split('|').map((s) => s.trim()).toList();
-      return parts.join('\n');
+      return _current.wordDe.split('|').first.trim();
     } else {
-      final parts = _current.wordEn.split('|').map((s) => s.trim()).toList();
-      return parts.join('\n');
+      return _current.wordEn.split('|').first.trim();
     }
   }
 

@@ -6,6 +6,7 @@ import 'stats_screen.dart';
 import 'dictionary_screen.dart';
 import 'settings_screen.dart';
 import 'scan_screen.dart';
+import 'units_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -15,11 +16,12 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int _totalVocabs = 0;
-  int _dueVocabs = 0;
-  int _dailyLimit = 50;
-  bool _isLoading = false;
-  String _loadingStatus = '';
-  bool _loadingHasError = false;
+  int _dueVocabs   = 0;
+  int _dailyLimit  = 50;
+  int _unitCount   = 0;
+  bool _isLoading  = false;
+  String _loadingStatus  = '';
+  bool _loadingHasError  = false;
   Map<String, int> _todayStats = {};
   int _streak = 0;
 
@@ -32,7 +34,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _init() async {
     final total = await DatabaseService.getVocabularyCount();
     if (total < 100) {
-      // Erststart: eingebettete Wörter laden, dann Download versuchen
       await _loadVocabularies();
     } else {
       await _loadStats();
@@ -40,17 +41,19 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadStats() async {
-    final total  = await DatabaseService.getVocabularyCount();
-    final limit  = await DatabaseService.getDailyLimit();
-    final due    = await DatabaseService.getDueCount();
-    final stats  = await DatabaseService.getTodayStats();
-    final streak = await DatabaseService.getLearningStreak();
+    final total   = await DatabaseService.getVocabularyCount();
+    final limit   = await DatabaseService.getDailyLimit();
+    final due     = await DatabaseService.getDueCount();
+    final stats   = await DatabaseService.getTodayStats();
+    final streak  = await DatabaseService.getLearningStreak();
+    final units   = await DatabaseService.getUnitCount();
     setState(() {
       _totalVocabs = total;
       _dueVocabs   = due;
       _dailyLimit  = limit;
       _todayStats  = stats;
       _streak      = streak;
+      _unitCount   = units;
     });
   }
 
@@ -60,20 +63,16 @@ class _HomeScreenState extends State<HomeScreen> {
       _loadingHasError = false;
       _loadingStatus = 'Starte...';
     });
-
     await VocabularyLoader.loadAndSaveVocabularies(
       onStatus: (s) {
         final hasError = s.startsWith('⚠️');
         setState(() {
-          _loadingStatus = s;
+          _loadingStatus   = s;
           _loadingHasError = hasError;
-          // Laden erst beenden wenn Erfolgsmeldung oder Fehlermeldung
           if (s.startsWith('✅') || hasError) _isLoading = false;
         });
       },
     );
-
-    // Fallback: sicherstellen dass Laden-Indikator verschwindet
     if (_isLoading) setState(() => _isLoading = false);
     await _loadStats();
   }
@@ -86,12 +85,12 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF1A1A2E),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(18),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ── Header ─────────────────────────────────────
+              // ── Header ────────────────────────────────────────
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -108,234 +107,174 @@ class _HomeScreenState extends State<HomeScreen> {
                               color: Colors.white38, fontSize: 14)),
                     ],
                   ),
-                  Row(
-                    children: [
-                      if (_streak > 0)
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 6),
-                          margin: const EdgeInsets.only(right: 8),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFF6B35).withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                                color: const Color(0xFFFF6B35).withOpacity(0.5)),
-                          ),
-                          child: Row(children: [
-                            const Text('🔥', style: TextStyle(fontSize: 14)),
-                            const SizedBox(width: 4),
-                            Text('$_streak Tage',
-                                style: const TextStyle(
-                                    color: Color(0xFFFF6B35),
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 13)),
-                          ]),
+                  Row(children: [
+                    if (_streak > 0)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
+                        margin: const EdgeInsets.only(right: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF6B35).withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                              color: const Color(0xFFFF6B35)
+                                  .withOpacity(0.5)),
                         ),
-                      IconButton(
-                        icon: const Icon(Icons.settings_outlined,
-                            color: Colors.white54),
-                        onPressed: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                              builder: (_) => const SettingsScreen()),
-                        ).then((_) => _loadStats()),
+                        child: Row(children: [
+                          const Text('🔥',
+                              style: TextStyle(fontSize: 14)),
+                          const SizedBox(width: 4),
+                          Text('$_streak Tage',
+                              style: const TextStyle(
+                                  color: Color(0xFFFF6B35),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13)),
+                        ]),
                       ),
-                    ],
-                  ),
+                    IconButton(
+                      icon: const Icon(Icons.settings_outlined,
+                          color: Colors.white54),
+                      onPressed: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => const SettingsScreen()),
+                      ).then((_) => _loadStats()),
+                    ),
+                  ]),
                 ],
               ),
 
-              const SizedBox(height: 20),
+              const SizedBox(height: 18),
 
-              // ── Lernkarte ────────────────────────────────────
+              // ── Heute-Kachel ──────────────────────────────────
               _buildDueCard(),
 
               const SizedBox(height: 14),
 
-              // ── Statistiken ──────────────────────────────────
+              // ── Stats-Kacheln ─────────────────────────────────
               Row(children: [
                 Expanded(
-                    child: _buildStatCard('📚', 'Gesamt',
+                    child: _statCard('📚', 'Vokabeln',
                         '$_totalVocabs', const Color(0xFF4ECDC4))),
                 const SizedBox(width: 10),
                 Expanded(
-                    child: _buildStatCard('✅', 'Heute richtig',
+                    child: _statCard('✅', 'Heute richtig',
                         '${_todayStats['correct'] ?? 0}',
                         const Color(0xFF2ECC71))),
                 const SizedBox(width: 10),
                 Expanded(
-                    child: _buildStatCard('❌', 'Heute falsch',
+                    child: _statCard('❌', 'Heute falsch',
                         '${_todayStats['wrong'] ?? 0}',
                         const Color(0xFFE74C3C))),
               ]),
 
               const SizedBox(height: 14),
 
-              // ── Status / Fehleranzeige ───────────────────────
+              // ── Units-Kachel ──────────────────────────────────
+              _buildUnitsCard(),
+
+              const SizedBox(height: 14),
+
+              // ── Status / Fehler ───────────────────────────────
               if (_isLoading || _loadingStatus.isNotEmpty)
                 _buildStatusBox(),
 
-              const Spacer(),
+              if (_isLoading || _loadingStatus.isNotEmpty)
+                const SizedBox(height: 14),
 
-              // ── Aktionsbuttons ───────────────────────────────
-              Column(children: [
-                SizedBox(
-                  width: double.infinity,
-                  height: 54,
-                  child: ElevatedButton(
-                    onPressed: _effectiveDue > 0 && !_isLoading
-                        ? () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (_) => const QuizScreen()),
-                            ).then((_) => _loadStats())
-                        : null,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF4ECDC4),
-                      disabledBackgroundColor:
-                          Colors.white.withOpacity(0.08),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16)),
-                    ),
-                    child: Text(
-                      _effectiveDue > 0
-                          ? '🎓 Lernen starten ($_effectiveDue Vokabeln)'
-                          : 'Heute alles gelernt! 🎉',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: _effectiveDue > 0
-                            ? Colors.black
-                            : Colors.white38,
-                      ),
-                    ),
+              // ── Hauptbutton ───────────────────────────────────
+              SizedBox(
+                width: double.infinity,
+                height: 54,
+                child: ElevatedButton(
+                  onPressed: _effectiveDue > 0 && !_isLoading
+                      ? () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const QuizScreen()),
+                          ).then((_) => _loadStats())
+                      : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4ECDC4),
+                    disabledBackgroundColor:
+                        Colors.white.withOpacity(0.08),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
                   ),
-                ),
-
-                const SizedBox(height: 10),
-
-                Row(children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) => const DictionaryScreen()),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.white70,
-                        side: BorderSide(
-                            color: Colors.white.withOpacity(0.2)),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text('📖 Wörterbuch'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) => const StatsScreen()),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.white70,
-                        side: BorderSide(
-                            color: Colors.white.withOpacity(0.2)),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text('📊 Statistiken'),
-                    ),
-                  ),
-                ]),
-
-                const SizedBox(height: 8),
-
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    onPressed: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => const ScanScreen()),
-                    ),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white70,
-                      side: BorderSide(color: Colors.white.withOpacity(0.2)),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                    ),
-                    child: const Text('📷 Buchseite scannen'),
-                  ),
-                ),
-
-                const SizedBox(height: 6),
-
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    onPressed: _isLoading ? null : _loadVocabularies,
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: _loadingHasError
-                          ? const Color(0xFFFF6B35)
+                  child: Text(
+                    _effectiveDue > 0
+                        ? '🎓 Lernen starten ($_effectiveDue Vokabeln)'
+                        : 'Heute alles gelernt! 🎉',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: _effectiveDue > 0
+                          ? Colors.black
                           : Colors.white38,
-                      side: BorderSide(
-                          color: _loadingHasError
-                              ? const Color(0xFFFF6B35).withOpacity(0.5)
-                              : Colors.white.withOpacity(0.1)),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
                     ),
-                    child: Text(_loadingHasError
-                        ? '🔄 Download erneut versuchen'
-                        : '🔄 Vokabeln neu laden'),
                   ),
                 ),
+              ),
+
+              const SizedBox(height: 10),
+
+              // ── Sekundär-Buttons ──────────────────────────────
+              Row(children: [
+                Expanded(child: _outlineBtn('📖 Wörterbuch', () {
+                  Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => const DictionaryScreen()));
+                })),
+                const SizedBox(width: 10),
+                Expanded(child: _outlineBtn('📊 Statistiken', () {
+                  Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => const StatsScreen()));
+                })),
               ]),
+
+              const SizedBox(height: 8),
+
+              SizedBox(
+                width: double.infinity,
+                child: _outlineBtn('📷 Buchseite scannen', () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => const ScanScreen()),
+                  ).then((_) => _loadStats());
+                }),
+              ),
+
+              const SizedBox(height: 6),
+
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: _isLoading ? null : _loadVocabularies,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _loadingHasError
+                        ? const Color(0xFFFF6B35)
+                        : Colors.white38,
+                    side: BorderSide(
+                        color: _loadingHasError
+                            ? const Color(0xFFFF6B35).withOpacity(0.5)
+                            : Colors.white.withOpacity(0.1)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: Text(_loadingHasError
+                      ? '🔄 Download erneut versuchen'
+                      : '🔄 Vokabeln neu laden'),
+                ),
+              ),
+
+              const SizedBox(height: 20),
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildStatusBox() {
-    final isError = _loadingHasError;
-    final color =
-        isError ? const Color(0xFFE74C3C) : const Color(0xFF4ECDC4);
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withOpacity(0.3)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (_isLoading)
-            Padding(
-              padding: const EdgeInsets.only(right: 10, top: 2),
-              child: SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: color),
-              ),
-            ),
-          Expanded(
-            child: Text(
-              _loadingStatus,
-              style: TextStyle(
-                  color: isError ? const Color(0xFFFF6B6B) : Colors.white70,
-                  fontSize: 13),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -358,8 +297,8 @@ class _HomeScreenState extends State<HomeScreen> {
           const Text('Heute zu lernen',
               style: TextStyle(color: Colors.white60, fontSize: 14)),
           Text('Limit: $_dailyLimit',
-              style:
-                  const TextStyle(color: Color(0xFF4ECDC4), fontSize: 12)),
+              style: const TextStyle(
+                  color: Color(0xFF4ECDC4), fontSize: 12)),
         ]),
         const SizedBox(height: 6),
         Text('$_effectiveDue Vokabeln',
@@ -369,8 +308,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 fontWeight: FontWeight.bold)),
         if (_dueVocabs > _dailyLimit)
           Text('($_dueVocabs fällig, Limit $_dailyLimit)',
-              style:
-                  const TextStyle(color: Colors.white38, fontSize: 12))
+              style: const TextStyle(color: Colors.white38, fontSize: 12))
         else if (_effectiveDue > 0)
           const Text('Bereit für heute?',
               style: TextStyle(color: Colors.white54, fontSize: 13))
@@ -381,8 +319,93 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildStatCard(
-      String icon, String label, String value, Color color) {
+  Widget _buildUnitsCard() {
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const UnitsScreen()),
+      ).then((_) => _loadStats()),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF4ECDC4).withOpacity(0.08),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+              color: const Color(0xFF4ECDC4).withOpacity(0.25)),
+        ),
+        child: Row(children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: const Color(0xFF4ECDC4).withOpacity(0.2),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Center(
+                child: Text('📚', style: TextStyle(fontSize: 22))),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+              const Text('Meine Units',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+              Text(
+                _unitCount == 0
+                    ? 'Buchseiten scannen und Wörter sammeln'
+                    : '$_unitCount Unit${_unitCount == 1 ? '' : 's'} · Tippe zum Öffnen',
+                style: const TextStyle(
+                    color: Colors.white38, fontSize: 12),
+              ),
+            ]),
+          ),
+          const Icon(Icons.arrow_forward_ios,
+              color: Colors.white24, size: 16),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildStatusBox() {
+    final isError = _loadingHasError;
+    final color =
+        isError ? const Color(0xFFE74C3C) : const Color(0xFF4ECDC4);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (_isLoading)
+          Padding(
+            padding: const EdgeInsets.only(right: 10, top: 2),
+            child: SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: color)),
+          ),
+        Expanded(
+          child: Text(_loadingStatus,
+              style: TextStyle(
+                  color: isError
+                      ? const Color(0xFFFF6B6B)
+                      : Colors.white70,
+                  fontSize: 12)),
+        ),
+      ]),
+    );
+  }
+
+  Widget _statCard(String icon, String label, String value, Color color) {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -402,6 +425,19 @@ class _HomeScreenState extends State<HomeScreen> {
             style: const TextStyle(color: Colors.white54, fontSize: 10),
             textAlign: TextAlign.center),
       ]),
+    );
+  }
+
+  Widget _outlineBtn(String label, VoidCallback onTap) {
+    return OutlinedButton(
+      onPressed: onTap,
+      style: OutlinedButton.styleFrom(
+        foregroundColor: Colors.white70,
+        side: BorderSide(color: Colors.white.withOpacity(0.2)),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12)),
+      ),
+      child: Text(label),
     );
   }
 }

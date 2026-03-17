@@ -17,11 +17,12 @@ class DatabaseService {
     final path = join(dbPath, 'vokabeltrainer.db');
     return await openDatabase(
       path,
-      version: 6,
+      version: 7,
       onCreate: (db, version) => _createTables(db),
       onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 6) {
+        if (oldVersion < 7) {
           await db.execute('DROP TABLE IF EXISTS vocabularies');
+          await _createUnitTables(db);
           await _createVocabTable(db);
           await db.execute('''CREATE TABLE IF NOT EXISTS settings (
               key TEXT PRIMARY KEY, value TEXT NOT NULL)''');
@@ -67,6 +68,25 @@ class DatabaseService {
         cards_reviewed INTEGER DEFAULT 0,
         cards_correct  INTEGER DEFAULT 0,
         cards_wrong    INTEGER DEFAULT 0)''');
+    await _createUnitTables(db);
+  }
+
+  static Future<void> _createUnitTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS scan_units (
+        id    INTEGER PRIMARY KEY AUTOINCREMENT,
+        name  TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS scan_unit_words (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        unit_id INTEGER NOT NULL,
+        word    TEXT NOT NULL,
+        FOREIGN KEY (unit_id) REFERENCES scan_units(id) ON DELETE CASCADE
+      )
+    ''');
   }
 
   // ─── Vokabeln abrufen ────────────────────────────────────────
@@ -85,8 +105,34 @@ class DatabaseService {
         SELECT * FROM vocabularies
         WHERE LOWER(word_en) LIKE ? OR LOWER(word_de) LIKE ?
         ORDER BY sort_order ASC, word_en ASC
-        LIMIT 200''', [q, q]);
+        LIMIT 1000''', [q, q]);
     return maps.map(Vocabulary.fromMap).toList();
+  }
+
+
+  /// Paginierte Abfrage fuer Dictionary Screen
+  static Future<List<Vocabulary>> getVocabulariesPaged({
+    required int offset,
+    required int limit,
+    required String query,
+  }) async {
+    final db = await database;
+    if (query.trim().isEmpty) {
+      // Blättern ohne Suche: paginiert laden (jeweils 100)
+      final maps = await db.query('vocabularies',
+          orderBy: 'sort_order ASC, word_en ASC',
+          limit: limit, offset: offset);
+      return maps.map(Vocabulary.fromMap).toList();
+    } else {
+      // Suche: ALLE Treffer aus allen 15000 Einträgen zurückgeben (kein LIMIT)
+      final q = '%\${query.trim().toLowerCase()}%';
+      final maps = await db.rawQuery(
+          'SELECT * FROM vocabularies'
+          ' WHERE LOWER(word_en) LIKE ? OR LOWER(word_de) LIKE ?'
+          ' ORDER BY sort_order ASC, word_en ASC',
+          [q, q]);
+      return maps.map(Vocabulary.fromMap).toList();
+    }
   }
 
   static Future<List<Vocabulary>> getDueVocabularies({int limit = 50}) async {
@@ -106,9 +152,12 @@ class DatabaseService {
       return all;
     }
 
-    final easy   = all.where((v) => v.sortOrder < 1000).toList()..shuffle();
-    final medium = all.where((v) => v.sortOrder >= 1000 && v.sortOrder < 5000).toList()..shuffle();
-    final hard   = all.where((v) => v.sortOrder >= 5000).toList()..shuffle();
+    // Mix aus verschiedenen Positionen im fälligen Pool
+    // Teile den Pool in Drittel (unabhängig von sort_order-Werten)
+    final third = all.length ~/ 3;
+    final easy   = all.sublist(0, third).toList()..shuffle();
+    final medium = all.sublist(third, third * 2).toList()..shuffle();
+    final hard   = all.sublist(third * 2).toList()..shuffle();
 
     final easyCount  = (limit * 0.40).round();
     final medCount   = (limit * 0.40).round();
@@ -120,6 +169,7 @@ class DatabaseService {
       ...hard.take(hardCount),
     ];
 
+    // Auffüllen falls eine Gruppe zu klein
     if (result.length < limit) {
       result.addAll(
         all.where((v) => !result.any((r) => r.id == v.id))
@@ -172,7 +222,7 @@ class DatabaseService {
           map['last_result']      = saved['last_result'];
           map['last_review_date'] = saved['last_review_date'];
         } else {
-          if (sortOrder < 300) {
+          if (sortOrder < 1000) {
             map['next_review_date'] = today.toIso8601String();
           } else {
             final daysAhead =
@@ -301,4 +351,69 @@ class DatabaseService {
       'wrong':    r.first['cards_wrong']     as int,
     };
   }
+  // ─── Scan-Units (Wortlisten aus Buchseiten) ─────────────────
+
+  static Future<int> createUnit(String name) async {
+    final db = await database;
+    return await db.insert('scan_units', {
+      'name': name,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+  }
+
+  static Future<List<Map<String, dynamic>>> getAllUnits() async {
+    final db = await database;
+    final units = await db.query('scan_units', orderBy: 'created_at DESC');
+    final result = <Map<String, dynamic>>[];
+    for (final u in units) {
+      final count = await db.rawQuery(
+          'SELECT COUNT(*) as c FROM scan_unit_words WHERE unit_id = ?',
+          [u['id']]);
+      result.add({...u, 'word_count': count.first['c'] as int});
+    }
+    return result;
+  }
+
+  static Future<List<String>> getUnitWords(int unitId) async {
+    final db = await database;
+    final rows = await db.query('scan_unit_words',
+        where: 'unit_id = ?', whereArgs: [unitId], orderBy: 'word ASC');
+    return rows.map((r) => r['word'] as String).toList();
+  }
+
+  static Future<void> addWordsToUnit(int unitId, List<String> words) async {
+    final db = await database;
+    final batch = db.batch();
+    for (final w in words) {
+      batch.insert('scan_unit_words', {'unit_id': unitId, 'word': w},
+          conflictAlgorithm: ConflictAlgorithm.ignore);
+    }
+    await batch.commit(noResult: true);
+  }
+
+  static Future<void> deleteUnit(int unitId) async {
+    final db = await database;
+    await db.delete('scan_units', where: 'id = ?', whereArgs: [unitId]);
+    await db.delete('scan_unit_words',
+        where: 'unit_id = ?', whereArgs: [unitId]);
+  }
+
+  static Future<void> removeWordFromUnit(int unitId, String word) async {
+    final db = await database;
+    await db.delete('scan_unit_words',
+        where: 'unit_id = ? AND word = ?', whereArgs: [unitId, word]);
+  }
+
+  static Future<int> getUnitCount() async {
+    final db = await database;
+    final r = await db.rawQuery('SELECT COUNT(*) as c FROM scan_units');
+    return r.first['c'] as int;
+  }
+
+  static Future<void> renameUnit(int unitId, String newName) async {
+    final db = await database;
+    await db.update('scan_units', {'name': newName},
+        where: 'id = ?', whereArgs: [unitId]);
+  }
+
 }
